@@ -27,6 +27,7 @@ function dispatcher (handlers) {
   const reducers = start._reducers = {}
   const effects = start._effects = {}
   const models = start._models = []
+  const namespaces = []
   var _state = {}
 
   start.model = setModel
@@ -77,6 +78,7 @@ function dispatcher (handlers) {
     // register values from the models
     models.forEach(function (model) {
       const ns = model.namespace
+      if (ns && !namespaces.indexOf(ns)) namespaces.push(ns)
       if (!stateCalled && model.state && opts.state !== false) {
         apply(ns, model.state, _state)
       }
@@ -90,6 +92,15 @@ function dispatcher (handlers) {
         apply(ns, model.subscriptions, subscriptions, createSend, onError)
       }
     })
+
+    if (opts.state) {
+      const os = opts.state
+      Object.keys(os).forEach(function (key) {
+        const val = os[key]
+        if (namespaces.indexOf(key) !== -1) mutate(_state[key], val)
+        else _state[key] = val
+      })
+    }
 
     if (!opts.noState) stateCalled = true
     if (!opts.noReducers) reducersCalled = true
