@@ -24,11 +24,9 @@ function dispatcher (hooks) {
 
   use(hooks)
 
-  var reducersCalled = false
-  var effectsCalled = false
   var stateCalled = false
-  var subsCalled = false
   var stopped = false
+  var initialized = false
 
   var subscriptions = start._subscriptions = {}
   var reducers = start._reducers = {}
@@ -61,14 +59,52 @@ function dispatcher (hooks) {
     if (hooks.wrapInitialState) initialStateWraps.push(hooks.wrapInitialState)
     if (hooks.wrapReducers) reducerWraps.push(hooks.wrapReducers)
     if (hooks.wrapEffects) effectWraps.push(hooks.wrapEffects)
-    if (hooks.models) hooks.models.forEach(setModel)
+    if (hooks.models) hooks.models.forEach((model) => setModel(model))
   }
 
   // push a model to be initiated
-  // obj -> null
-  function setModel (model) {
+  // obj, obj -> null
+  function setModel (model, opts) {
+    opts = opts || {}
     assert.equal(typeof model, 'object', 'barracks.store.model: model should be an object')
+    assert.equal(typeof opts, 'object', 'barracks.store.model: opts should be an an object')
     models.push(model)
+    if (initialized) initializeModel(model, opts)
+  }
+
+  // initialize a model
+  // obj, obj -> null
+  function initializeModel (model, opts) {
+    var ns = model.namespace
+    if (!stateCalled && model.state && opts.state !== false) {
+      var modelState = model.state || {}
+      if (ns) {
+        _state[ns] = _state[ns] || {}
+        apply(ns, modelState, _state)
+      } else {
+        mutate(_state, modelState)
+      }
+    }
+    if (model.reducers && opts.reducers !== false) {
+      apply(ns, model.reducers, reducers, function (cb) {
+        return wrapHook(cb, reducerWraps)
+      })
+    }
+    if (model.effects && opts.effects !== false) {
+      apply(ns, model.effects, effects, function (cb) {
+        return wrapHook(cb, effectWraps)
+      })
+    }
+    if (model.subscriptions && opts.subscriptions !== false) {
+      apply(ns, model.subscriptions, subscriptions, function (cb, key) {
+        var send = createSend('subscription: ' + (ns ? ns + ':' + key : key))
+        cb = wrapHook(cb, subscriptionWraps)
+        cb(send, function (err) {
+          applyHook(onErrorHooks, err, _state, createSend)
+        })
+        return cb
+      })
+    }
   }
 
   // get the current state from the store
@@ -120,38 +156,8 @@ function dispatcher (hooks) {
     opts = opts || {}
     assert.equal(typeof opts, 'object', 'barracks.store.start: opts should be undefined or an object')
 
-    // register values from the models
     models.forEach(function (model) {
-      var ns = model.namespace
-      if (!stateCalled && model.state && opts.state !== false) {
-        var modelState = model.state || {}
-        if (ns) {
-          _state[ns] = _state[ns] || {}
-          apply(ns, modelState, _state)
-        } else {
-          mutate(_state, modelState)
-        }
-      }
-      if (!reducersCalled && model.reducers && opts.reducers !== false) {
-        apply(ns, model.reducers, reducers, function (cb) {
-          return wrapHook(cb, reducerWraps)
-        })
-      }
-      if (!effectsCalled && model.effects && opts.effects !== false) {
-        apply(ns, model.effects, effects, function (cb) {
-          return wrapHook(cb, effectWraps)
-        })
-      }
-      if (!subsCalled && model.subscriptions && opts.subscriptions !== false) {
-        apply(ns, model.subscriptions, subscriptions, function (cb, key) {
-          var send = createSend('subscription: ' + (ns ? ns + ':' + key : key))
-          cb = wrapHook(cb, subscriptionWraps)
-          cb(send, function (err) {
-            applyHook(onErrorHooks, err, _state, createSend)
-          })
-          return cb
-        })
-      }
+      initializeModel(model, opts)
     })
 
     // the state wrap is special because we want to operate on the full
@@ -160,104 +166,102 @@ function dispatcher (hooks) {
       _state = wrapHook(_state, initialStateWraps)
     }
 
-    if (!opts.noSubscriptions) subsCalled = true
-    if (!opts.noReducers) reducersCalled = true
-    if (!opts.noEffects) effectsCalled = true
     if (!opts.noState) stateCalled = true
+    initialized = true
 
     if (!onErrorHooks.length) onErrorHooks.push(wrapOnError(defaultOnError))
 
     return createSend
+  }
 
-    // call an action from a view
-    // (str, bool?) -> (str, any?, fn?) -> null
-    function createSend (selfName, callOnError) {
-      assert.equal(typeof selfName, 'string', 'barracks.store.start.createSend: selfName should be a string')
-      assert.ok(!callOnError || typeof callOnError === 'boolean', 'barracks.store.start.send: callOnError should be undefined or a boolean')
+  // call an action from a view
+  // (str, bool?) -> (str, any?, fn?) -> null
+  function createSend (selfName, callOnError) {
+    assert.equal(typeof selfName, 'string', 'barracks.store.start.createSend: selfName should be a string')
+    assert.ok(!callOnError || typeof callOnError === 'boolean', 'barracks.store.start.send: callOnError should be undefined or a boolean')
 
-      return function send (name, data, cb) {
-        if (!cb && !callOnError) {
-          cb = data
-          data = null
-        }
-        data = (typeof data === 'undefined' ? null : data)
+    return function send (name, data, cb) {
+      if (!cb && !callOnError) {
+        cb = data
+        data = null
+      }
+      data = (typeof data === 'undefined' ? null : data)
 
-        assert.equal(typeof name, 'string', 'barracks.store.start.send: name should be a string')
-        assert.ok(!cb || typeof cb === 'function', 'barracks.store.start.send: cb should be a function')
+      assert.equal(typeof name, 'string', 'barracks.store.start.send: name should be a string')
+      assert.ok(!cb || typeof cb === 'function', 'barracks.store.start.send: cb should be a function')
 
-        var done = callOnError ? onErrorCallback : cb
-        _send(name, data, selfName, done)
+      var done = callOnError ? onErrorCallback : cb
+      _send(name, data, selfName, done)
 
-        function onErrorCallback (err) {
-          err = err || null
-          if (err) {
-            applyHook(onErrorHooks, err, _state, function createSend (selfName) {
-              return function send (name, data) {
-                assert.equal(typeof name, 'string', 'barracks.store.start.send: name should be a string')
-                data = (typeof data === 'undefined' ? null : data)
-                _send(name, data, selfName, done)
-              }
-            })
-          }
+      function onErrorCallback (err) {
+        err = err || null
+        if (err) {
+          applyHook(onErrorHooks, err, _state, function createSend (selfName) {
+            return function send (name, data) {
+              assert.equal(typeof name, 'string', 'barracks.store.start.send: name should be a string')
+              data = (typeof data === 'undefined' ? null : data)
+              _send(name, data, selfName, done)
+            }
+          })
         }
       }
     }
+  }
 
-    // call an action
-    // (str, str, any, fn) -> null
-    function _send (name, data, caller, cb) {
-      if (stopped) return
+  // call an action
+  // (str, str, any, fn) -> null
+  function _send (name, data, caller, cb) {
+    if (stopped) return
 
-      assert.equal(typeof name, 'string', 'barracks._send: name should be a string')
-      assert.equal(typeof caller, 'string', 'barracks._send: caller should be a string')
-      assert.equal(typeof cb, 'function', 'barracks._send: cb should be a function')
+    assert.equal(typeof name, 'string', 'barracks._send: name should be a string')
+    assert.equal(typeof caller, 'string', 'barracks._send: caller should be a string')
+    assert.equal(typeof cb, 'function', 'barracks._send: cb should be a function')
 
-      ;(tick(function () {
-        var reducersCalled = false
-        var effectsCalled = false
-        var newState = xtend(_state)
+    ;(tick(function () {
+      var reducersCalled = false
+      var effectsCalled = false
+      var newState = xtend(_state)
 
-        if (onActionHooks.length) {
-          applyHook(onActionHooks, _state, data, name, caller, createSend)
+      if (onActionHooks.length) {
+        applyHook(onActionHooks, _state, data, name, caller, createSend)
+      }
+
+      // validate if a namespace exists. Namespaces are delimited by ':'.
+      var actionName = name
+      if (/:/.test(name)) {
+        var arr = name.split(':')
+        var ns = arr.shift()
+        actionName = arr.join(':')
+      }
+
+      var _reducers = ns ? reducers[ns] : reducers
+      if (_reducers && _reducers[actionName]) {
+        if (ns) {
+          var reducedState = _reducers[actionName](_state[ns], data)
+          newState[ns] = xtend(_state[ns], reducedState)
+        } else {
+          mutate(newState, reducers[actionName](_state, data))
         }
-
-        // validate if a namespace exists. Namespaces are delimited by ':'.
-        var actionName = name
-        if (/:/.test(name)) {
-          var arr = name.split(':')
-          var ns = arr.shift()
-          actionName = arr.join(':')
+        reducersCalled = true
+        if (onStateChangeHooks.length) {
+          applyHook(onStateChangeHooks, newState, data, _state, actionName, createSend)
         }
+        _state = newState
+        cb(null, newState)
+      }
 
-        var _reducers = ns ? reducers[ns] : reducers
-        if (_reducers && _reducers[actionName]) {
-          if (ns) {
-            var reducedState = _reducers[actionName](_state[ns], data)
-            newState[ns] = xtend(_state[ns], reducedState)
-          } else {
-            mutate(newState, reducers[actionName](_state, data))
-          }
-          reducersCalled = true
-          if (onStateChangeHooks.length) {
-            applyHook(onStateChangeHooks, newState, data, _state, actionName, createSend)
-          }
-          _state = newState
-          cb(null, newState)
-        }
+      var _effects = ns ? effects[ns] : effects
+      if (!reducersCalled && _effects && _effects[actionName]) {
+        var send = createSend('effect: ' + name)
+        if (ns) _effects[actionName](_state[ns], data, send, cb)
+        else _effects[actionName](_state, data, send, cb)
+        effectsCalled = true
+      }
 
-        var _effects = ns ? effects[ns] : effects
-        if (!reducersCalled && _effects && _effects[actionName]) {
-          var send = createSend('effect: ' + name)
-          if (ns) _effects[actionName](_state[ns], data, send, cb)
-          else _effects[actionName](_state, data, send, cb)
-          effectsCalled = true
-        }
-
-        if (!reducersCalled && !effectsCalled) {
-          throw new Error('Could not find action ' + actionName)
-        }
-      }))()
-    }
+      if (!reducersCalled && !effectsCalled) {
+        throw new Error('Could not find action ' + actionName)
+      }
+    }))()
   }
 
   // stop an app, essentially turns

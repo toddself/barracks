@@ -91,6 +91,29 @@ tape('api: store.use()', (t) => {
       t.deepEqual(called, expected, 'all hooks were called')
     }, 100)
   })
+
+  t.test('adding models after store is started', (t) => {
+    t.plan(1)
+    const store = barracks()
+    const createSend = store.start()
+    const send = createSend('test', true)
+
+    store.model({
+      namespace: 'after',
+      state: {
+        foo: 'bar'
+      },
+      reducers: {
+        boop: (state, data) => ({foo: data})
+      }
+    })
+    send('after:boop', 'baz')
+    setTimeout(function () {
+      const expected = {after: {foo: 'baz'}}
+      const state = store.state()
+      t.deepEqual(state, expected, 'added models trigger correctly')
+    }, 10)
+  })
 })
 
 tape('api: createSend = store.start(opts)', (t) => {
